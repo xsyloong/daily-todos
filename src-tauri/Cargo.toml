@@ -1,6 +1,6 @@
 [package]
 name = "daily-todo-app"
-version = "1.0.0"
+version = "0.0.1"
 description = "轻量级程序员每日待办软件"
 authors = ["you"]
 edition = "2021"

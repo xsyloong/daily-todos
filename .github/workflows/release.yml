@@ -2,9 +2,17 @@ name: Release Desktop Apps
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.0.1
+        required: true
+        type: string
   push:
     tags:
       - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,10 +22,16 @@ jobs:
         include:
           - platform: windows-latest
             name: windows
+            args: --verbose
           - platform: ubuntu-22.04
             name: linux
+            args: --verbose
           - platform: macos-latest
-            name: macos
+            name: macos-aarch64
+            args: --target aarch64-apple-darwin --verbose
+          - platform: macos-latest
+            name: macos-x86_64
+            args: --target x86_64-apple-darwin --verbose
 
     runs-on: ${{ matrix.platform }}
 
@@ -33,6 +47,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Install Linux dependencies
         if: matrix.name == 'linux'
@@ -47,19 +63,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --include=dev --registry=https://registry.npmjs.org/ --replace-registry-host=always
 
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+      - name: Build and upload release assets
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --verbose
-
-      - name: Upload bundles
-        uses: actions/upload-artifact@v4
-        with:
-          name: daily-todo-app-${{ matrix.name }}
-          path: |
-            src-tauri/target/release/bundle/**/*
-            src-tauri/target/release/daily-todo-app.exe
-            src-tauri/target/release/daily-todo-app
-          if-no-files-found: ignore
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: Daily Todo App ${{ github.event.inputs.tag || github.ref_name }}
+          releaseBody: Desktop installers are available below.
+          releaseDraft: true
+          prerelease: false
+          releaseAssetNamePattern: daily-todo-app_[version]_[platform]_[arch]_[bundle][setup][ext]
+          args: ${{ matrix.args }}
