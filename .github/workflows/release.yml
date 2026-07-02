@@ -1,4 +1,4 @@
-name: Build Desktop Apps
+name: Release Desktop Apps
 
 on:
   workflow_dispatch:
