@@ -45,7 +45,7 @@ jobs:
             patchelf
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --include=dev --registry=https://registry.npmjs.org/ --replace-registry-host=always
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
