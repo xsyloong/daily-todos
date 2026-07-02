@@ -734,15 +734,20 @@ async fn show_editor_window(app: AppHandle) -> Result<(), String> {
 
 fn create_wallpaper_window(app: &AppHandle) -> Result<(), String> {
     // 小组件模式使用普通 Tauri 窗口，不再挂到 Explorer 桌面层，避免影响桌面图标。
-    WebviewWindowBuilder::new(app, "wallpaper", WebviewUrl::App("wallpaper.html".into()))
-        .title("每日待办 - 小组件")
-        .inner_size(380.0, 520.0)
-        .min_inner_size(320.0, 380.0)
-        .decorations(false)
-        .resizable(true)
-        .skip_taskbar(true)
-        .always_on_top(true)
-        .transparent(true)
+    let builder =
+        WebviewWindowBuilder::new(app, "wallpaper", WebviewUrl::App("wallpaper.html".into()))
+            .title("每日待办 - 小组件")
+            .inner_size(380.0, 520.0)
+            .min_inner_size(320.0, 380.0)
+            .decorations(false)
+            .resizable(true)
+            .skip_taskbar(true)
+            .always_on_top(true);
+
+    #[cfg(windows)]
+    let builder = builder.transparent(true);
+
+    builder
         .visible(true)
         .center()
         .build()
