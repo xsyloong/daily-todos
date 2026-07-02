@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default permissions for local app windows.","local":true,"windows":["editor","wallpaper"],"permissions":["core:default","core:window:allow-start-dragging","notification:default"]}}
