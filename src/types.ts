@@ -47,3 +47,47 @@ export interface DataFileSwitchResult {
   todos: TodoItem[];
   status: DataFileStatus;
 }
+
+export interface JiraConfigView {
+  enabled: boolean;
+  siteUrl: string;
+  email: string;
+  apiTokenConfigured: boolean;
+  refreshIntervalSeconds: number;
+  maxIssues: number;
+  jql: string;
+  configPath: string;
+}
+
+export interface JiraIssue {
+  key: string;
+  summary: string;
+  status: string;
+  priority?: string | null;
+  issueType?: string | null;
+  updated?: string | null;
+  dueDate?: string | null;
+  url: string;
+}
+
+export interface JiraTestResult {
+  issueCount: number;
+  hasMore: boolean;
+  warnings: string[];
+  message: string;
+}
+
+export interface JiraDiagnosticQueryResult {
+  label: string;
+  jql: string;
+  issueCount?: number | null;
+  hasMore: boolean;
+  error?: string | null;
+}
+
+export interface JiraDiagnosticResult {
+  accountId: string;
+  displayName: string;
+  emailAddress?: string | null;
+  queries: JiraDiagnosticQueryResult[];
+}

@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -15,6 +17,12 @@ const AUTOSTART_DESKTOP_FILE_NAME: &str = "daily-todo-app.desktop";
 #[cfg(target_os = "macos")]
 const MACOS_LAUNCH_AGENT_ID: &str = "com.dailytodo.desktop";
 const EXTERNAL_TODOS_FILE_NAME: &str = "daily-todos.json";
+const JIRA_CONFIG_FILE_NAME: &str = "jira-config.json";
+const DEFAULT_JIRA_REFRESH_INTERVAL_SECONDS: u64 = 60;
+const DEFAULT_JIRA_MAX_ISSUES: u32 = 20;
+const DEFAULT_JIRA_JQL: &str =
+    "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
+const JIRA_FIELDS: &str = "summary,status,priority,issuetype,updated,duedate";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct LongTermStage {
@@ -104,6 +112,157 @@ struct DataFileSwitchResult {
     status: DataFileStatus,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct JiraConfigFile {
+    enabled: bool,
+    #[serde(rename = "siteUrl")]
+    site_url: String,
+    email: String,
+    #[serde(rename = "apiToken")]
+    api_token: String,
+    #[serde(rename = "refreshIntervalSeconds")]
+    refresh_interval_seconds: u64,
+    #[serde(rename = "maxIssues")]
+    max_issues: u32,
+    jql: String,
+}
+
+impl Default for JiraConfigFile {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            site_url: String::new(),
+            email: String::new(),
+            api_token: String::new(),
+            refresh_interval_seconds: DEFAULT_JIRA_REFRESH_INTERVAL_SECONDS,
+            max_issues: DEFAULT_JIRA_MAX_ISSUES,
+            jql: DEFAULT_JIRA_JQL.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct JiraConfigInput {
+    enabled: bool,
+    #[serde(rename = "siteUrl")]
+    site_url: String,
+    email: String,
+    #[serde(rename = "apiToken")]
+    api_token: Option<String>,
+    #[serde(rename = "refreshIntervalSeconds")]
+    refresh_interval_seconds: u64,
+    #[serde(rename = "maxIssues")]
+    max_issues: u32,
+    jql: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraConfigView {
+    enabled: bool,
+    #[serde(rename = "siteUrl")]
+    site_url: String,
+    email: String,
+    #[serde(rename = "apiTokenConfigured")]
+    api_token_configured: bool,
+    #[serde(rename = "refreshIntervalSeconds")]
+    refresh_interval_seconds: u64,
+    #[serde(rename = "maxIssues")]
+    max_issues: u32,
+    jql: String,
+    #[serde(rename = "configPath")]
+    config_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraIssue {
+    key: String,
+    summary: String,
+    status: String,
+    priority: Option<String>,
+    #[serde(rename = "issueType")]
+    issue_type: Option<String>,
+    updated: Option<String>,
+    #[serde(rename = "dueDate")]
+    due_date: Option<String>,
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraTestResult {
+    #[serde(rename = "issueCount")]
+    issue_count: usize,
+    #[serde(rename = "hasMore")]
+    has_more: bool,
+    warnings: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraDiagnosticResult {
+    #[serde(rename = "accountId")]
+    account_id: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "emailAddress")]
+    email_address: Option<String>,
+    queries: Vec<JiraDiagnosticQueryResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraDiagnosticQueryResult {
+    label: String,
+    jql: String,
+    #[serde(rename = "issueCount")]
+    issue_count: Option<usize>,
+    #[serde(rename = "hasMore")]
+    has_more: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JiraUserResponse {
+    #[serde(rename = "accountId")]
+    account_id: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "emailAddress")]
+    email_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JiraSearchResponse {
+    issues: Vec<JiraApiIssue>,
+    #[serde(rename = "isLast")]
+    is_last: Option<bool>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+    #[serde(rename = "warningMessages", default)]
+    warning_messages: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JiraApiIssue {
+    key: String,
+    fields: JiraApiFields,
+}
+
+#[derive(Debug, Deserialize)]
+struct JiraApiFields {
+    summary: Option<String>,
+    status: Option<JiraNamedField>,
+    priority: Option<JiraNamedField>,
+    #[serde(rename = "issuetype")]
+    issue_type: Option<JiraNamedField>,
+    updated: Option<String>,
+    #[serde(rename = "duedate")]
+    due_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JiraNamedField {
+    name: String,
+}
+
 fn get_data_dir() -> PathBuf {
     let mut path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("daily-todo-app");
@@ -128,6 +287,12 @@ fn get_settings_path() -> PathBuf {
     path
 }
 
+fn get_jira_config_path() -> PathBuf {
+    let mut path = get_data_dir();
+    path.push(JIRA_CONFIG_FILE_NAME);
+    path
+}
+
 fn get_current_exe_command() -> Result<String, String> {
     let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
     Ok(format!("\"{}\"", exe_path.display()))
@@ -149,6 +314,297 @@ fn write_settings_file(settings: &AppSettings) -> Result<(), String> {
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     fs::write(&path, content).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn read_jira_config_file() -> Result<JiraConfigFile, String> {
+    let path = get_jira_config_path();
+    if !path.exists() {
+        return Ok(JiraConfigFile::default());
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut config: JiraConfigFile =
+        serde_json::from_str(&content).map_err(|e| format!("Jira 配置文件格式错误: {}", e))?;
+    normalize_jira_config_values(&mut config);
+    Ok(config)
+}
+
+fn write_jira_config_file(config: &JiraConfigFile) -> Result<(), String> {
+    let path = get_jira_config_path();
+    let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(&path, content).map_err(|e| format!("保存 Jira 配置失败: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(0o600);
+        let _ = fs::set_permissions(&path, permissions);
+    }
+
+    Ok(())
+}
+
+fn normalize_jira_config_values(config: &mut JiraConfigFile) {
+    config.site_url = config.site_url.trim().trim_end_matches('/').to_string();
+    config.email = config.email.trim().to_string();
+    config.refresh_interval_seconds = config.refresh_interval_seconds.clamp(30, 3600);
+    config.max_issues = config.max_issues.clamp(1, 100);
+    config.jql = config.jql.trim().to_string();
+    if config.jql.is_empty() {
+        config.jql = DEFAULT_JIRA_JQL.to_string();
+    }
+}
+
+fn create_jira_config_view(config: &JiraConfigFile) -> JiraConfigView {
+    JiraConfigView {
+        enabled: config.enabled,
+        site_url: config.site_url.clone(),
+        email: config.email.clone(),
+        api_token_configured: !config.api_token.trim().is_empty(),
+        refresh_interval_seconds: config.refresh_interval_seconds,
+        max_issues: config.max_issues,
+        jql: config.jql.clone(),
+        config_path: get_jira_config_path().display().to_string(),
+    }
+}
+
+fn build_jira_config(
+    input: JiraConfigInput,
+    existing: JiraConfigFile,
+) -> Result<JiraConfigFile, String> {
+    let api_token = input
+        .api_token
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .unwrap_or(existing.api_token);
+
+    let mut config = JiraConfigFile {
+        enabled: input.enabled,
+        site_url: input.site_url,
+        email: input.email,
+        api_token,
+        refresh_interval_seconds: input.refresh_interval_seconds,
+        max_issues: input.max_issues,
+        jql: input.jql,
+    };
+    normalize_jira_config_values(&mut config);
+
+    if config.enabled {
+        config.site_url = validate_jira_site_url(&config.site_url)?;
+        validate_jira_config_for_fetch(&config)?;
+    } else if !config.site_url.is_empty() {
+        config.site_url = validate_jira_site_url(&config.site_url)?;
+    }
+
+    Ok(config)
+}
+
+fn validate_jira_config_for_fetch(config: &JiraConfigFile) -> Result<(), String> {
+    validate_jira_site_url(&config.site_url)?;
+    if config.email.trim().is_empty() {
+        return Err("Jira 邮箱不能为空".to_string());
+    }
+    if config.api_token.trim().is_empty() {
+        return Err("Jira API Token 不能为空".to_string());
+    }
+    if config.jql.trim().is_empty() {
+        return Err("Jira JQL 不能为空".to_string());
+    }
+    Ok(())
+}
+
+fn validate_jira_site_url(site_url: &str) -> Result<String, String> {
+    let trimmed = site_url.trim().trim_end_matches('/');
+    let mut parsed =
+        reqwest::Url::parse(trimmed).map_err(|_| "Jira 站点地址格式错误".to_string())?;
+
+    if parsed.scheme() != "https" {
+        return Err("Jira 站点地址必须使用 https".to_string());
+    }
+
+    if parsed.host_str().is_none() {
+        return Err("Jira 站点地址必须包含域名".to_string());
+    }
+
+    parsed.set_path("");
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn sanitize_jira_error_body(body: &str) -> String {
+    let mut text = body.replace('\n', " ").replace('\r', " ");
+    if text.len() > 300 {
+        text.truncate(300);
+        text.push_str("...");
+    }
+    text
+}
+
+async fn search_jira_issues_internal(
+    config: &JiraConfigFile,
+) -> Result<JiraSearchResponse, String> {
+    if !config.enabled {
+        return Ok(JiraSearchResponse {
+            issues: Vec::new(),
+            is_last: Some(true),
+            next_page_token: None,
+            warning_messages: Vec::new(),
+        });
+    }
+
+    search_jira_issues_with_jql(config, &config.jql, config.max_issues).await
+}
+
+async fn search_jira_issues_with_jql(
+    config: &JiraConfigFile,
+    jql: &str,
+    max_issues: u32,
+) -> Result<JiraSearchResponse, String> {
+    validate_jira_config_for_fetch(config)?;
+    let site_url = validate_jira_site_url(&config.site_url)?;
+    let search_url = format!("{}/rest/api/3/search/jql", site_url);
+    let fields: Vec<&str> = JIRA_FIELDS.split(',').collect();
+    let request_body = serde_json::json!({
+        "jql": jql,
+        "fields": fields,
+        "maxResults": max_issues.clamp(1, 100)
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("创建 Jira HTTP 客户端失败: {}", e))?;
+
+    let response = client
+        .post(search_url)
+        .header("Accept", "application/json")
+        .basic_auth(&config.email, Some(&config.api_token))
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("请求 Jira 失败: {}", e))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("读取 Jira 响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Jira 请求失败: HTTP {} {}",
+            status.as_u16(),
+            sanitize_jira_error_body(&body)
+        ));
+    }
+
+    let parsed: JiraSearchResponse =
+        serde_json::from_str(&body).map_err(|e| format!("解析 Jira 响应失败: {}", e))?;
+
+    Ok(parsed)
+}
+
+async fn get_jira_current_user(config: &JiraConfigFile) -> Result<JiraUserResponse, String> {
+    validate_jira_config_for_fetch(config)?;
+    let site_url = validate_jira_site_url(&config.site_url)?;
+    let myself_url = format!("{}/rest/api/3/myself", site_url);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("创建 Jira HTTP 客户端失败: {}", e))?;
+
+    let response = client
+        .get(myself_url)
+        .header("Accept", "application/json")
+        .basic_auth(&config.email, Some(&config.api_token))
+        .send()
+        .await
+        .map_err(|e| format!("请求 Jira 当前用户失败: {}", e))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("读取 Jira 当前用户响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Jira 当前用户请求失败: HTTP {} {}",
+            status.as_u16(),
+            sanitize_jira_error_body(&body)
+        ));
+    }
+
+    serde_json::from_str(&body).map_err(|e| format!("解析 Jira 当前用户响应失败: {}", e))
+}
+
+async fn fetch_jira_issues_internal(config: &JiraConfigFile) -> Result<Vec<JiraIssue>, String> {
+    if !config.enabled {
+        return Ok(Vec::new());
+    }
+
+    let site_url = validate_jira_site_url(&config.site_url)?;
+    let parsed = search_jira_issues_internal(config).await?;
+
+    Ok(parsed
+        .issues
+        .into_iter()
+        .map(|issue| JiraIssue {
+            url: format!("{}/browse/{}", site_url, issue.key),
+            key: issue.key,
+            summary: issue.fields.summary.unwrap_or_else(|| "无标题".to_string()),
+            status: issue
+                .fields
+                .status
+                .map(|status| status.name)
+                .unwrap_or_else(|| "未知状态".to_string()),
+            priority: issue.fields.priority.map(|priority| priority.name),
+            issue_type: issue.fields.issue_type.map(|issue_type| issue_type.name),
+            updated: issue.fields.updated,
+            due_date: issue.fields.due_date,
+        })
+        .collect())
+}
+
+fn is_valid_jira_issue_key(key: &str) -> bool {
+    let mut parts = key.split('-');
+    let Some(project) = parts.next() else {
+        return false;
+    };
+    let Some(number) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || project.is_empty() || number.is_empty() {
+        return false;
+    }
+
+    project
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn open_url_in_default_browser(url: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let result = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(url).spawn();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = Command::new("xdg-open").arg(url).spawn();
+
+    #[cfg(not(any(windows, target_os = "macos", unix)))]
+    let result: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "unsupported platform",
+    ));
+
+    result
+        .map(|_| ())
+        .map_err(|e| format!("打开浏览器失败: {}", e))
 }
 
 fn normalize_data_file_path(path: &str) -> Result<PathBuf, String> {
@@ -362,6 +818,102 @@ fn reload_todos_from_file() -> Result<DataFileSwitchResult, String> {
     let status = get_data_file_status_from_settings(&settings)?;
 
     Ok(DataFileSwitchResult { todos, status })
+}
+
+#[tauri::command]
+fn load_jira_config() -> Result<JiraConfigView, String> {
+    let config = read_jira_config_file()?;
+    Ok(create_jira_config_view(&config))
+}
+
+#[tauri::command]
+fn save_jira_config(input: JiraConfigInput) -> Result<JiraConfigView, String> {
+    let existing = read_jira_config_file()?;
+    let config = build_jira_config(input, existing)?;
+    write_jira_config_file(&config)?;
+    Ok(create_jira_config_view(&config))
+}
+
+#[tauri::command]
+async fn fetch_jira_issues() -> Result<Vec<JiraIssue>, String> {
+    let config = read_jira_config_file()?;
+    fetch_jira_issues_internal(&config).await
+}
+
+#[tauri::command]
+async fn test_jira_connection() -> Result<JiraTestResult, String> {
+    let mut config = read_jira_config_file()?;
+    config.enabled = true;
+    let search = search_jira_issues_internal(&config).await?;
+    let has_more = search.is_last == Some(false) || search.next_page_token.is_some();
+    Ok(JiraTestResult {
+        issue_count: search.issues.len(),
+        has_more,
+        warnings: search.warning_messages,
+        message: "Jira 连接成功".to_string(),
+    })
+}
+
+#[tauri::command]
+async fn diagnose_jira_connection() -> Result<JiraDiagnosticResult, String> {
+    let mut config = read_jira_config_file()?;
+    config.enabled = true;
+    let user = get_jira_current_user(&config).await?;
+    let explicit_account_jql = format!(
+        "assignee = \"{}\" AND statusCategory != Done ORDER BY updated DESC",
+        user.account_id
+    );
+    let explicit_account_all_jql =
+        format!("assignee = \"{}\" ORDER BY updated DESC", user.account_id);
+    let diagnostic_queries = vec![
+        ("当前配置", config.jql.clone()),
+        (
+            "currentUser 不限状态",
+            "assignee = currentUser() ORDER BY updated DESC".to_string(),
+        ),
+        ("显式账号未完成", explicit_account_jql),
+        ("显式账号不限状态", explicit_account_all_jql),
+    ];
+
+    let mut queries = Vec::new();
+    for (label, jql) in diagnostic_queries {
+        match search_jira_issues_with_jql(&config, &jql, config.max_issues).await {
+            Ok(search) => queries.push(JiraDiagnosticQueryResult {
+                label: label.to_string(),
+                jql,
+                issue_count: Some(search.issues.len()),
+                has_more: search.is_last == Some(false) || search.next_page_token.is_some(),
+                error: None,
+            }),
+            Err(error) => queries.push(JiraDiagnosticQueryResult {
+                label: label.to_string(),
+                jql,
+                issue_count: None,
+                has_more: false,
+                error: Some(error),
+            }),
+        }
+    }
+
+    Ok(JiraDiagnosticResult {
+        account_id: user.account_id,
+        display_name: user.display_name,
+        email_address: user.email_address,
+        queries,
+    })
+}
+
+#[tauri::command]
+fn open_jira_issue(key: String) -> Result<(), String> {
+    if !is_valid_jira_issue_key(&key) {
+        return Err("Jira issue key 格式错误".to_string());
+    }
+
+    let config = read_jira_config_file()?;
+    validate_jira_config_for_fetch(&config)?;
+    let site_url = validate_jira_site_url(&config.site_url)?;
+    let url = format!("{}/browse/{}", site_url, key);
+    open_url_in_default_browser(&url)
 }
 
 #[cfg(windows)]
@@ -825,6 +1377,12 @@ fn main() {
             set_data_folder_path,
             reset_data_file_path,
             reload_todos_from_file,
+            load_jira_config,
+            save_jira_config,
+            fetch_jira_issues,
+            test_jira_connection,
+            diagnose_jira_connection,
+            open_jira_issue,
             is_autostart_enabled,
             set_autostart_enabled,
             show_notification,

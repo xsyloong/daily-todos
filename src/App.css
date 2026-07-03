@@ -33,15 +33,260 @@
   transition: width 0.3s ease;
 }
 
+.settings-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+  background: #f5f6fa;
+}
+
+.settings-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.settings-page-header h2 {
+  margin: 0;
+  color: #222;
+  font-size: 20px;
+}
+
+.settings-page-header p {
+  margin: 2px 0 0;
+  color: #777;
+  font-size: 13px;
+}
+
+.settings-page-header button {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border: 1px solid #d9dce8;
+  border-radius: 6px;
+  background: #fff;
+  color: #555;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.settings-section {
+  margin-bottom: 14px;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid #e5e7f0;
+  border-radius: 8px;
+}
+
+.settings-section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.settings-section-title h3 {
+  margin: 0;
+  color: #333;
+  font-size: 15px;
+}
+
+.settings-section-title span {
+  min-width: 0;
+  overflow: hidden;
+  color: #888;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
 .app-footer {
   flex: 0 0 auto;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: 10px;
   padding: 10px 14px;
   background: #fff;
   border-top: 1px solid #e0e0e0;
+}
+
+.app-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.jira-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  background: #f7f8fb;
+  border: 1px solid #e5e7f0;
+  border-radius: 8px;
+}
+
+.jira-config-header,
+.jira-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.jira-config-header {
+  justify-content: space-between;
+}
+
+.jira-enable-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #555;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.jira-token-status {
+  flex: 0 0 auto;
+  color: #777;
+  font-size: 12px;
+}
+
+.jira-config-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.95fr) minmax(0, 0.95fr) 72px 72px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.jira-config-input,
+.jira-jql-input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #d9dce8;
+  border-radius: 6px;
+  background: #fff;
+  color: #333;
+  font-size: 12px;
+  outline: none;
+}
+
+.jira-config-input.compact {
+  text-align: center;
+}
+
+.jira-jql-input {
+  resize: vertical;
+  line-height: 1.35;
+}
+
+.jira-config-input:focus,
+.jira-jql-input:focus {
+  border-color: #667eea;
+}
+
+.jira-config-input:disabled,
+.jira-jql-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.jira-config-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #777;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.jira-config-actions button {
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  border: 1px solid #d9dce8;
+  border-radius: 6px;
+  background: #fff;
+  color: #555;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.jira-config-actions button:hover:not(:disabled) {
+  border-color: #667eea;
+  color: #667eea;
+}
+
+.jira-config-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.jira-config-message {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.jira-diagnostic {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px;
+  background: #fff;
+  border: 1px solid #e5e7f0;
+  border-radius: 6px;
+}
+
+.jira-diagnostic-user {
+  color: #555;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.jira-diagnostic-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.jira-diagnostic-row {
+  display: grid;
+  grid-template-columns: 108px 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #666;
+  font-size: 12px;
+}
+
+.jira-diagnostic-label,
+.jira-diagnostic-count {
+  white-space: nowrap;
+}
+
+.jira-diagnostic-count {
+  color: #2f6fdb;
+  font-weight: 700;
+}
+
+.jira-diagnostic-jql {
+  min-width: 0;
+  overflow: hidden;
+  color: #777;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .data-file-panel {
@@ -171,13 +416,17 @@
 }
 
 @media (max-width: 520px) {
-  .app-footer {
+  .app-footer-row {
     align-items: stretch;
     flex-direction: column;
   }
 
   .startup-toggle {
     justify-content: flex-end;
+  }
+
+  .jira-config-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

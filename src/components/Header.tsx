@@ -4,9 +4,15 @@ interface HeaderProps {
   selectedDate: string;
   onToggleWidget: () => void;
   onToggleCalendar: () => void;
+  onOpenSettings: () => void;
 }
 
-function Header({ selectedDate, onToggleWidget, onToggleCalendar }: HeaderProps) {
+function Header({
+  selectedDate,
+  onToggleWidget,
+  onToggleCalendar,
+  onOpenSettings,
+}: HeaderProps) {
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr + "T00:00:00");
     const year = date.getFullYear();
@@ -27,7 +33,14 @@ function Header({ selectedDate, onToggleWidget, onToggleCalendar }: HeaderProps)
       </div>
       <div className="header-right">
         <button
-          className="wallpaper-btn"
+          className="header-icon-btn"
+          onClick={onOpenSettings}
+          title="设置"
+        >
+          ⚙
+        </button>
+        <button
+          className="header-icon-btn"
           onClick={onToggleWidget}
           title="切换小组件模式"
         >

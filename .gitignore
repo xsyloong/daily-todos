@@ -19,6 +19,7 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+jira-config.json
 
 # Editor / IDE
 .vscode/

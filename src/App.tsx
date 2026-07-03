@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { DataFileStatus, DataFileSwitchResult, TodoItem } from "./types";
+import {
+  DataFileStatus,
+  DataFileSwitchResult,
+  JiraDiagnosticResult,
+  JiraConfigView,
+  JiraTestResult,
+  TodoItem,
+} from "./types";
 import {
   getTodoTimeRange,
   parseTimeRange,
@@ -22,6 +29,20 @@ import Header from "./components/Header";
 import "./App.css";
 
 const RECENT_TIME_RANGES_KEY = "daily-todo-app:recent-time-ranges";
+const DEFAULT_JIRA_JQL =
+  "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
+
+interface JiraConfigFormState {
+  enabled: boolean;
+  siteUrl: string;
+  email: string;
+  apiToken: string;
+  apiTokenConfigured: boolean;
+  refreshIntervalSeconds: string;
+  maxIssues: string;
+  jql: string;
+  configPath: string;
+}
 
 function loadStoredRecentTimeRanges(): string[] {
   try {
@@ -48,12 +69,27 @@ function normalizeTodos(todos: TodoItem[]): TodoItem[] {
   return todos.map((todo) => normalizeLongTermTodo(todo));
 }
 
+function createJiraFormState(config?: JiraConfigView): JiraConfigFormState {
+  return {
+    enabled: config?.enabled ?? false,
+    siteUrl: config?.siteUrl ?? "",
+    email: config?.email ?? "",
+    apiToken: "",
+    apiTokenConfigured: config?.apiTokenConfigured ?? false,
+    refreshIntervalSeconds: String(config?.refreshIntervalSeconds ?? 60),
+    maxIssues: String(config?.maxIssues ?? 20),
+    jql: config?.jql ?? DEFAULT_JIRA_JQL,
+    configPath: config?.configPath ?? "",
+  };
+}
+
 function App() {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(
     getLocalDateString()
   );
   const [showCalendar, setShowCalendar] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [storedRecentTimeRanges, setStoredRecentTimeRanges] = useState<string[]>(
     () => loadStoredRecentTimeRanges()
   );
@@ -62,6 +98,13 @@ function App() {
   const [dataFileStatus, setDataFileStatus] = useState<DataFileStatus | undefined>();
   const [dataFileInput, setDataFileInput] = useState("");
   const [dataFileLoading, setDataFileLoading] = useState(false);
+  const [jiraForm, setJiraForm] = useState<JiraConfigFormState>(() =>
+    createJiraFormState()
+  );
+  const [jiraLoading, setJiraLoading] = useState(true);
+  const [jiraSaving, setJiraSaving] = useState(false);
+  const [jiraMessage, setJiraMessage] = useState("");
+  const [jiraDiagnostic, setJiraDiagnostic] = useState<JiraDiagnosticResult | undefined>();
 
   const loadTodos = async () => {
     try {
@@ -82,6 +125,18 @@ function App() {
     }
   };
 
+  const loadJiraConfig = async () => {
+    try {
+      const config = await invoke<JiraConfigView>("load_jira_config");
+      setJiraForm(createJiraFormState(config));
+    } catch (error) {
+      console.error("加载 Jira 配置失败:", error);
+      setJiraMessage(`加载 Jira 配置失败: ${error}`);
+    } finally {
+      setJiraLoading(false);
+    }
+  };
+
   const saveTodos = async (newTodos: TodoItem[]) => {
     try {
       await invoke("save_todos", { todos: newTodos });
@@ -95,6 +150,7 @@ function App() {
   useEffect(() => {
     loadTodos();
     loadDataFileStatus();
+    loadJiraConfig();
     loadAutostartStatus();
   }, []);
 
@@ -364,6 +420,68 @@ function App() {
     }
   };
 
+  const saveJiraConfig = async (shouldTest = false) => {
+    setJiraSaving(true);
+    setJiraMessage("");
+    try {
+      const savedConfig = await invoke<JiraConfigView>("save_jira_config", {
+        input: {
+          enabled: jiraForm.enabled,
+          siteUrl: jiraForm.siteUrl,
+          email: jiraForm.email,
+          apiToken: jiraForm.apiToken || null,
+          refreshIntervalSeconds: Number(jiraForm.refreshIntervalSeconds) || 60,
+          maxIssues: Number(jiraForm.maxIssues) || 20,
+          jql: jiraForm.jql,
+        },
+      });
+      setJiraForm(createJiraFormState(savedConfig));
+
+      if (shouldTest) {
+        const result = await invoke<JiraTestResult>("test_jira_connection");
+        const countText = result.hasMore
+          ? `当前返回 ${result.issueCount} 条，还有更多结果未展示`
+          : `当前返回 ${result.issueCount} 条`;
+        const warningText =
+          result.warnings.length > 0 ? `；Jira 警告：${result.warnings.join("；")}` : "";
+        setJiraMessage(
+          result.issueCount === 0
+            ? `${result.message}，${countText}。若 Jira 页面里有未完成任务，请检查邮箱是否是同一个 Atlassian 账号，或临时把 JQL 改为 assignee = currentUser() ORDER BY updated DESC 测试。${warningText}`
+            : `${result.message}，${countText}${warningText}`
+        );
+      } else {
+        setJiraMessage("Jira 配置已保存");
+      }
+      return true;
+    } catch (error) {
+      console.error("保存 Jira 配置失败:", error);
+      setJiraMessage(`Jira 配置失败: ${error}`);
+      return false;
+    } finally {
+      setJiraSaving(false);
+    }
+  };
+
+  const diagnoseJiraConfig = async () => {
+    setJiraSaving(true);
+    setJiraMessage("");
+    setJiraDiagnostic(undefined);
+    try {
+      const saved = await saveJiraConfig(false);
+      if (!saved) {
+        return;
+      }
+      const result = await invoke<JiraDiagnosticResult>("diagnose_jira_connection");
+      setJiraDiagnostic(result);
+      setJiraMessage("Jira 诊断完成");
+    } catch (error) {
+      console.error("Jira 诊断失败:", error);
+      setJiraMessage(`Jira 诊断失败: ${error}`);
+    } finally {
+      setJiraSaving(false);
+    }
+  };
+
   const todosForSelectedDate = getTodosForDate(todos, selectedDate);
   const completedCount = todosForSelectedDate.filter((t) =>
     isTodoCompletedOnDate(t, selectedDate)
@@ -376,8 +494,215 @@ function App() {
         selectedDate={selectedDate}
         onToggleWidget={toggleWidget}
         onToggleCalendar={() => setShowCalendar(!showCalendar)}
+        onOpenSettings={() => setShowSettings(true)}
       />
 
+      {showSettings ? (
+        <div className="settings-page">
+          <div className="settings-page-header">
+            <div>
+              <h2>设置</h2>
+              <p>Jira、数据文件和开机启动配置</p>
+            </div>
+            <button type="button" onClick={() => setShowSettings(false)}>
+              返回
+            </button>
+          </div>
+
+          <section className="settings-section">
+            <div className="settings-section-title">
+              <h3>Jira 只读展示</h3>
+              <span>配置文件仅保存在本机应用数据目录</span>
+            </div>
+            <div className="jira-config-panel">
+              <div className="jira-config-header">
+                <label className="jira-enable-toggle">
+                  <input
+                    type="checkbox"
+                    checked={jiraForm.enabled}
+                    disabled={jiraLoading || jiraSaving}
+                    onChange={(e) =>
+                      setJiraForm((current) => ({
+                        ...current,
+                        enabled: e.target.checked,
+                      }))
+                    }
+                  />
+                  <span>启用 Jira 只读展示</span>
+                </label>
+                <span className="jira-token-status">
+                  Token {jiraForm.apiTokenConfigured ? "已保存" : "未保存"}
+                </span>
+              </div>
+              <div className="jira-config-grid">
+                <input
+                  type="text"
+                  className="jira-config-input"
+                  value={jiraForm.siteUrl}
+                  disabled={jiraLoading || jiraSaving}
+                  placeholder="https://your-domain.atlassian.net"
+                  onChange={(e) =>
+                    setJiraForm((current) => ({ ...current, siteUrl: e.target.value }))
+                  }
+                />
+                <input
+                  type="email"
+                  className="jira-config-input"
+                  value={jiraForm.email}
+                  disabled={jiraLoading || jiraSaving}
+                  placeholder="Jira 登录邮箱"
+                  onChange={(e) =>
+                    setJiraForm((current) => ({ ...current, email: e.target.value }))
+                  }
+                />
+                <input
+                  type="password"
+                  className="jira-config-input"
+                  value={jiraForm.apiToken}
+                  disabled={jiraLoading || jiraSaving}
+                  placeholder={jiraForm.apiTokenConfigured ? "留空保留已保存 Token" : "API Token"}
+                  onChange={(e) =>
+                    setJiraForm((current) => ({ ...current, apiToken: e.target.value }))
+                  }
+                />
+                <input
+                  type="number"
+                  min={30}
+                  max={3600}
+                  className="jira-config-input compact"
+                  value={jiraForm.refreshIntervalSeconds}
+                  disabled={jiraLoading || jiraSaving}
+                  title="刷新间隔秒数"
+                  onChange={(e) =>
+                    setJiraForm((current) => ({
+                      ...current,
+                      refreshIntervalSeconds: e.target.value,
+                    }))
+                  }
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  className="jira-config-input compact"
+                  value={jiraForm.maxIssues}
+                  disabled={jiraLoading || jiraSaving}
+                  title="最大展示数量"
+                  onChange={(e) =>
+                    setJiraForm((current) => ({ ...current, maxIssues: e.target.value }))
+                  }
+                />
+              </div>
+              <textarea
+                className="jira-jql-input"
+                value={jiraForm.jql}
+                disabled={jiraLoading || jiraSaving}
+                rows={3}
+                onChange={(e) =>
+                  setJiraForm((current) => ({ ...current, jql: e.target.value }))
+                }
+              />
+              <div className="jira-config-actions">
+                <span className="jira-config-path" title={jiraForm.configPath}>
+                  {jiraForm.configPath || "Jira 配置读取中..."}
+                </span>
+                <button type="button" disabled={jiraLoading || jiraSaving} onClick={() => saveJiraConfig(false)}>
+                  保存
+                </button>
+                <button type="button" disabled={jiraLoading || jiraSaving} onClick={() => saveJiraConfig(true)}>
+                  测试连接
+                </button>
+                <button type="button" disabled={jiraLoading || jiraSaving} onClick={diagnoseJiraConfig}>
+                  诊断
+                </button>
+              </div>
+              {jiraMessage && <div className="jira-config-message">{jiraMessage}</div>}
+              {jiraDiagnostic && (
+                <div className="jira-diagnostic">
+                  <div className="jira-diagnostic-user">
+                    当前 token 用户：{jiraDiagnostic.displayName}
+                    {jiraDiagnostic.emailAddress ? ` · ${jiraDiagnostic.emailAddress}` : ""}
+                  </div>
+                  <div className="jira-diagnostic-list">
+                    {jiraDiagnostic.queries.map((query) => (
+                      <div key={query.label} className="jira-diagnostic-row">
+                        <div className="jira-diagnostic-label">{query.label}</div>
+                        <div className="jira-diagnostic-count">
+                          {query.error
+                            ? "失败"
+                            : `${query.issueCount ?? 0} 条${query.hasMore ? "+" : ""}`}
+                        </div>
+                        <div className="jira-diagnostic-jql" title={query.jql}>
+                          {query.error ?? query.jql}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">
+              <h3>数据文件</h3>
+              <span>本地待办同步文件夹</span>
+            </div>
+            <div className="data-file-panel">
+              <div className="data-file-summary">
+                <span className="data-file-label">数据文件夹</span>
+                <span
+                  className="data-file-current"
+                  title={dataFileStatus?.activeDataFilePath ?? ""}
+                >
+                  {dataFileStatus
+                    ? dataFileStatus.usingDefaultDataFile
+                      ? "默认本地"
+                      : dataFileStatus.activeDataFilePath
+                    : "读取中..."}
+                </span>
+              </div>
+              <div className="data-file-controls">
+                <input
+                  type="text"
+                  className="data-file-input"
+                  value={dataFileInput}
+                  disabled={dataFileLoading}
+                  placeholder="例如 E:\\notes"
+                  onChange={(e) => setDataFileInput(e.target.value)}
+                />
+                <button type="button" disabled={dataFileLoading} onClick={useDataFile}>
+                  使用
+                </button>
+                <button type="button" disabled={dataFileLoading} onClick={reloadDataFile}>
+                  重新加载
+                </button>
+                <button type="button" disabled={dataFileLoading} onClick={resetDataFile}>
+                  恢复默认
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">
+              <h3>系统</h3>
+              <span>桌面应用行为</span>
+            </div>
+            <label className="startup-toggle">
+              <span className="startup-text">开机启动</span>
+              <input
+                type="checkbox"
+                checked={autostartEnabled}
+                disabled={autostartLoading}
+                onChange={toggleAutostart}
+              />
+              <span className="startup-switch" aria-hidden="true" />
+            </label>
+          </section>
+        </div>
+      ) : (
+        <>
       {showCalendar && (
         <Calendar
           selectedDate={selectedDate}
@@ -405,53 +730,8 @@ function App() {
         onDeleteTodo={deleteTodo}
         onEarlyCompleteTodo={earlyCompleteTodo}
       />
-
-      <div className="app-footer">
-        <div className="data-file-panel">
-          <div className="data-file-summary">
-            <span className="data-file-label">数据文件夹</span>
-            <span
-              className="data-file-current"
-              title={dataFileStatus?.activeDataFilePath ?? ""}
-            >
-              {dataFileStatus
-                ? dataFileStatus.usingDefaultDataFile
-                  ? "默认本地"
-                  : dataFileStatus.activeDataFilePath
-                : "读取中..."}
-            </span>
-          </div>
-          <div className="data-file-controls">
-            <input
-              type="text"
-              className="data-file-input"
-              value={dataFileInput}
-              disabled={dataFileLoading}
-              placeholder="例如 E:\\notes"
-              onChange={(e) => setDataFileInput(e.target.value)}
-            />
-            <button type="button" disabled={dataFileLoading} onClick={useDataFile}>
-              使用
-            </button>
-            <button type="button" disabled={dataFileLoading} onClick={reloadDataFile}>
-              重新加载
-            </button>
-            <button type="button" disabled={dataFileLoading} onClick={resetDataFile}>
-              恢复默认
-            </button>
-          </div>
-        </div>
-        <label className="startup-toggle">
-          <span className="startup-text">开机启动</span>
-          <input
-            type="checkbox"
-            checked={autostartEnabled}
-            disabled={autostartLoading}
-            onChange={toggleAutostart}
-          />
-          <span className="startup-switch" aria-hidden="true" />
-        </label>
-      </div>
+      </>
+      )}
     </div>
   );
 }

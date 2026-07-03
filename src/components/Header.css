@@ -41,17 +41,18 @@
   gap: 10px;
 }
 
-.wallpaper-btn {
+.header-icon-btn {
   background: rgba(255, 255, 255, 0.2);
   border: none;
   color: white;
-  padding: 6px 12px;
+  width: 34px;
+  height: 34px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 18px;
   transition: all 0.2s;
 }
 
-.wallpaper-btn:hover {
+.header-icon-btn:hover {
   background: rgba(255, 255, 255, 0.3);
 }
