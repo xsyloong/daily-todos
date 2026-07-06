@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default permissions for local app windows.","local":true,"windows":["editor","wallpaper"],"permissions":["core:default","core:window:allow-start-dragging","notification:default"]}}
+{"default":{"identifier":"default","description":"Default permissions for local app windows.","local":true,"windows":["editor","wallpaper","widget-jira","widget-daily","widget-long-term"],"permissions":["core:default","core:window:allow-start-dragging","core:window:allow-start-resize-dragging","notification:default"]}}

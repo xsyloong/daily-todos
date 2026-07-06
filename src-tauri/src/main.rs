@@ -2,13 +2,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 
 const AUTOSTART_APP_NAME: &str = "DailyTodoApp";
 const AUTOSTART_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -18,11 +23,33 @@ const AUTOSTART_DESKTOP_FILE_NAME: &str = "daily-todo-app.desktop";
 const MACOS_LAUNCH_AGENT_ID: &str = "com.dailytodo.desktop";
 const EXTERNAL_TODOS_FILE_NAME: &str = "daily-todos.json";
 const JIRA_CONFIG_FILE_NAME: &str = "jira-config.json";
+const APP_LOG_FILE_NAME: &str = "daily-todo-app.log";
+const MAX_LOG_FILE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_JIRA_REFRESH_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_JIRA_MAX_ISSUES: u32 = 20;
+const WIDGET_WINDOW_MARGIN_LOGICAL: f64 = 18.0;
+const WIDGET_WINDOW_GAP_LOGICAL: f64 = 12.0;
+const WIDGET_WINDOW_WIDTH_LOGICAL: f64 = 380.0;
+const WIDGET_WINDOW_MIN_WIDTH_LOGICAL: f64 = 300.0;
+const WIDGET_WINDOW_MIN_HEIGHT_LOGICAL: f64 = 48.0;
+const WIDGET_WINDOW_MAX_HEIGHT_LOGICAL: f64 = 900.0;
+const LEGACY_WIDGET_WINDOW_LABEL: &str = "wallpaper";
+const WIDGET_JIRA_WINDOW_LABEL: &str = "widget-jira";
+const WIDGET_DAILY_WINDOW_LABEL: &str = "widget-daily";
+const WIDGET_LONG_TERM_WINDOW_LABEL: &str = "widget-long-term";
+const WIDGET_WINDOW_LABELS: [&str; 3] = [
+    WIDGET_JIRA_WINDOW_LABEL,
+    WIDGET_DAILY_WINDOW_LABEL,
+    WIDGET_LONG_TERM_WINDOW_LABEL,
+];
+const WIDGET_WINDOW_INITIAL_HEIGHTS: [f64; 3] = [220.0, 180.0, 180.0];
+const WIDGET_WINDOW_POSITION_TOLERANCE: i32 = 2;
 const DEFAULT_JIRA_JQL: &str =
     "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
 const JIRA_FIELDS: &str = "summary,status,priority,issuetype,updated,duedate";
+
+static EXPECTED_WIDGET_WINDOW_MOVES: OnceLock<Mutex<[Option<(i32, i32)>; 3]>> = OnceLock::new();
+static EXPECTED_WIDGET_WINDOW_RESIZE_WIDTHS: OnceLock<Mutex<[Option<u32>; 3]>> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct LongTermStage {
@@ -291,6 +318,66 @@ fn get_jira_config_path() -> PathBuf {
     let mut path = get_data_dir();
     path.push(JIRA_CONFIG_FILE_NAME);
     path
+}
+
+fn get_app_log_file_path() -> PathBuf {
+    let mut path = get_data_dir();
+    path.push(APP_LOG_FILE_NAME);
+    path
+}
+
+fn sanitize_log_text(value: &str) -> String {
+    let mut text = value.replace('\n', " ").replace('\r', " ");
+    if text.len() > 1200 {
+        text.truncate(1200);
+        text.push_str("...");
+    }
+    text
+}
+
+fn current_log_timestamp() -> String {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:03}", duration.as_secs(), duration.subsec_millis())
+}
+
+fn rotate_log_file_if_needed(path: &Path) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() <= MAX_LOG_FILE_BYTES {
+        return;
+    }
+
+    let mut old_path = path.to_path_buf();
+    old_path.set_extension("log.old");
+    let _ = fs::remove_file(&old_path);
+    let _ = fs::rename(path, old_path);
+}
+
+fn append_app_log(level: &str, message: &str) {
+    let path = get_app_log_file_path();
+    rotate_log_file_if_needed(&path);
+
+    let level = sanitize_log_text(level);
+    let message = sanitize_log_text(message);
+    let line = format!("[{}] [{}] {}\n", current_log_timestamp(), level, message);
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+#[tauri::command]
+fn get_app_log_path() -> Result<String, String> {
+    Ok(get_app_log_file_path().display().to_string())
+}
+
+#[tauri::command]
+fn write_app_log(level: String, message: String) -> Result<(), String> {
+    append_app_log(&level, &message);
+    Ok(())
 }
 
 fn get_current_exe_command() -> Result<String, String> {
@@ -1259,15 +1346,21 @@ async fn show_notification(
 
 #[tauri::command]
 async fn toggle_widget_mode(app: AppHandle) -> Result<(), String> {
-    // 检查小组件窗口是否存在
-    if let Some(wallpaper) = app.get_webview_window("wallpaper") {
-        // 如果存在，关闭它
-        wallpaper.close().map_err(|e| e.to_string())?;
+    append_app_log("INFO", "toggle_widget_mode requested");
+    let result = if has_widget_windows(&app) {
+        append_app_log("INFO", "closing widget windows");
+        close_widget_windows(&app)
     } else {
-        // 创建小组件窗口
-        create_wallpaper_window(&app)?;
+        append_app_log("INFO", "creating widget windows");
+        create_widget_windows(&app)
+    };
+
+    match &result {
+        Ok(()) => append_app_log("INFO", "toggle_widget_mode completed"),
+        Err(error) => append_app_log("ERROR", &format!("toggle_widget_mode failed: {error}")),
     }
-    Ok(())
+
+    result
 }
 
 #[tauri::command]
@@ -1284,34 +1377,428 @@ async fn show_editor_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn create_wallpaper_window(app: &AppHandle) -> Result<(), String> {
-    // 小组件模式使用普通 Tauri 窗口，不再挂到 Explorer 桌面层，避免影响桌面图标。
-    let builder =
-        WebviewWindowBuilder::new(app, "wallpaper", WebviewUrl::App("wallpaper.html".into()))
-            .title("每日待办 - 小组件")
-            .inner_size(380.0, 520.0)
-            .min_inner_size(320.0, 380.0)
-            .decorations(false)
-            .resizable(true)
-            .skip_taskbar(true)
-            .always_on_top(true);
+#[tauri::command]
+fn resize_widget_window(app: AppHandle, label: String, height: f64) -> Result<(), String> {
+    if widget_window_index(&label).is_none() {
+        return Ok(());
+    }
+    if !height.is_finite() {
+        append_app_log(
+            "WARN",
+            &format!("resize_widget_window ignored non-finite height label={label}"),
+        );
+        return Ok(());
+    }
+
+    let Some(window) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+
+    let clamped_height = height.clamp(
+        WIDGET_WINDOW_MIN_HEIGHT_LOGICAL,
+        WIDGET_WINDOW_MAX_HEIGHT_LOGICAL,
+    );
+    let current_position = window.outer_position().map_err(|e| e.to_string())?;
+    let current_outer_size = window.outer_size().map_err(|e| e.to_string())?;
+    let current_inner_size = window.inner_size().map_err(|e| e.to_string())?;
+    let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
+    let width = f64::from(current_inner_size.width) / scale_factor;
+    let current_height = f64::from(current_inner_size.height) / scale_factor;
+    if (current_height - clamped_height).abs() < 1.0 {
+        return Ok(());
+    }
+
+    let next_physical_height = (clamped_height * scale_factor).round() as i32;
+    let frame_height = current_outer_size
+        .height
+        .saturating_sub(current_inner_size.height) as i32;
+    let next_outer_height = next_physical_height + frame_height;
+    let next_y = current_position.y + current_outer_size.height as i32 - next_outer_height;
+    let next_position = PhysicalPosition {
+        x: current_position.x,
+        y: next_y,
+    };
+
+    window
+        .set_size(Size::Logical(LogicalSize {
+            width,
+            height: clamped_height,
+        }))
+        .map_err(|e| e.to_string())?;
+    set_widget_window_position(&window, &label, next_position)?;
+    align_widget_windows_from_anchor(&app, &label, next_position)
+}
+
+fn widget_window_index(label: &str) -> Option<usize> {
+    WIDGET_WINDOW_LABELS
+        .iter()
+        .position(|candidate| *candidate == label)
+}
+
+fn expected_widget_window_moves() -> &'static Mutex<[Option<(i32, i32)>; 3]> {
+    EXPECTED_WIDGET_WINDOW_MOVES.get_or_init(|| Mutex::new([None, None, None]))
+}
+
+fn expected_widget_window_resize_widths() -> &'static Mutex<[Option<u32>; 3]> {
+    EXPECTED_WIDGET_WINDOW_RESIZE_WIDTHS.get_or_init(|| Mutex::new([None, None, None]))
+}
+
+fn positions_match(position: PhysicalPosition<i32>, expected: (i32, i32)) -> bool {
+    (position.x - expected.0).abs() <= WIDGET_WINDOW_POSITION_TOLERANCE
+        && (position.y - expected.1).abs() <= WIDGET_WINDOW_POSITION_TOLERANCE
+}
+
+fn widths_match(width: u32, expected: u32) -> bool {
+    width.abs_diff(expected) <= WIDGET_WINDOW_POSITION_TOLERANCE as u32
+}
+
+fn consume_expected_widget_window_move(label: &str, position: PhysicalPosition<i32>) -> bool {
+    let Some(index) = widget_window_index(label) else {
+        return false;
+    };
+    let Ok(mut expected_moves) = expected_widget_window_moves().lock() else {
+        return false;
+    };
+    let Some(expected_position) = expected_moves[index] else {
+        return false;
+    };
+
+    if positions_match(position, expected_position) {
+        expected_moves[index] = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn mark_expected_widget_window_move(label: &str, position: PhysicalPosition<i32>) {
+    let Some(index) = widget_window_index(label) else {
+        return;
+    };
+    let Ok(mut expected_moves) = expected_widget_window_moves().lock() else {
+        return;
+    };
+    expected_moves[index] = Some((position.x, position.y));
+}
+
+fn consume_expected_widget_window_resize(label: &str, width: u32) -> bool {
+    let Some(index) = widget_window_index(label) else {
+        return false;
+    };
+    let Ok(mut expected_widths) = expected_widget_window_resize_widths().lock() else {
+        return false;
+    };
+    let Some(expected_width) = expected_widths[index] else {
+        return false;
+    };
+
+    if widths_match(width, expected_width) {
+        expected_widths[index] = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn mark_expected_widget_window_resize(label: &str, width: u32) {
+    let Some(index) = widget_window_index(label) else {
+        return;
+    };
+    let Ok(mut expected_widths) = expected_widget_window_resize_widths().lock() else {
+        return;
+    };
+    expected_widths[index] = Some(width);
+}
+
+fn set_widget_window_position(
+    window: &WebviewWindow,
+    label: &str,
+    position: PhysicalPosition<i32>,
+) -> Result<(), String> {
+    mark_expected_widget_window_move(label, position);
+    window
+        .set_position(Position::Physical(position))
+        .map_err(|e| e.to_string())
+}
+
+fn has_widget_windows(app: &AppHandle) -> bool {
+    app.get_webview_window(LEGACY_WIDGET_WINDOW_LABEL).is_some()
+        || WIDGET_WINDOW_LABELS
+            .iter()
+            .any(|label| app.get_webview_window(label).is_some())
+}
+
+fn close_widget_windows(app: &AppHandle) -> Result<(), String> {
+    if let Some(wallpaper) = app.get_webview_window(LEGACY_WIDGET_WINDOW_LABEL) {
+        wallpaper.close().map_err(|e| e.to_string())?;
+    }
+
+    for label in WIDGET_WINDOW_LABELS {
+        if let Some(window) = app.get_webview_window(label) {
+            window.close().map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn widget_window_title(label: &str) -> &'static str {
+    match label {
+        WIDGET_JIRA_WINDOW_LABEL => "每日待办 - Jira",
+        WIDGET_DAILY_WINDOW_LABEL => "每日待办 - 每日代办",
+        WIDGET_LONG_TERM_WINDOW_LABEL => "每日待办 - 长期代办",
+        _ => "每日待办 - 小组件",
+    }
+}
+
+fn create_widget_window(
+    app: &AppHandle,
+    label: &str,
+    initial_height: f64,
+) -> Result<WebviewWindow, String> {
+    append_app_log(
+        "INFO",
+        &format!("create_widget_window start label={label} height={initial_height}"),
+    );
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("wallpaper.html".into()))
+        .title(widget_window_title(label))
+        .inner_size(WIDGET_WINDOW_WIDTH_LOGICAL, initial_height)
+        .min_inner_size(
+            WIDGET_WINDOW_MIN_WIDTH_LOGICAL,
+            WIDGET_WINDOW_MIN_HEIGHT_LOGICAL,
+        )
+        .decorations(false)
+        .resizable(true)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .visible(false);
 
     #[cfg(windows)]
+    let builder = builder.transparent(true).shadow(false);
+
+    #[cfg(not(windows))]
     let builder = builder.transparent(true);
 
-    builder
-        .visible(true)
-        .center()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let window = builder.build().map_err(|e| e.to_string())?;
+    append_app_log("INFO", &format!("create_widget_window built label={label}"));
+    Ok(window)
+}
+
+fn create_widget_windows(app: &AppHandle) -> Result<(), String> {
+    if let Some(wallpaper) = app.get_webview_window(LEGACY_WIDGET_WINDOW_LABEL) {
+        append_app_log("INFO", "closing legacy wallpaper widget window");
+        wallpaper.close().map_err(|e| e.to_string())?;
+    }
+
+    for (index, label) in WIDGET_WINDOW_LABELS.iter().enumerate() {
+        if app.get_webview_window(label).is_none() {
+            create_widget_window(app, label, WIDGET_WINDOW_INITIAL_HEIGHTS[index])?;
+        } else {
+            append_app_log(
+                "INFO",
+                &format!("widget window already exists label={label}"),
+            );
+        }
+    }
+
+    for label in WIDGET_WINDOW_LABELS {
+        if let Some(window) = app.get_webview_window(label) {
+            append_app_log("INFO", &format!("show widget window label={label}"));
+            window.show().map_err(|e| e.to_string())?;
+        }
+    }
+
+    append_app_log("INFO", "position_widget_windows_bottom_right start");
+    position_widget_windows_bottom_right(app)?;
+    append_app_log("INFO", "position_widget_windows_bottom_right completed");
+
+    append_app_log("INFO", "create_widget_windows completed");
+    Ok(())
+}
+
+fn position_widget_windows_bottom_right(app: &AppHandle) -> Result<(), String> {
+    let monitor_window = app
+        .get_webview_window("editor")
+        .or_else(|| app.get_webview_window(WIDGET_LONG_TERM_WINDOW_LABEL));
+    let Some(monitor_window) = monitor_window else {
+        append_app_log("WARN", "position skipped: no monitor source window");
+        return Ok(());
+    };
+
+    append_app_log(
+        "INFO",
+        &format!("position monitor source label={}", monitor_window.label()),
+    );
+    let monitor = match monitor_window
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+    {
+        Some(monitor) => Some(monitor),
+        None => monitor_window
+            .primary_monitor()
+            .map_err(|e| e.to_string())?,
+    };
+    let Some(monitor) = monitor else {
+        append_app_log("WARN", "position skipped: no monitor available");
+        return Ok(());
+    };
+
+    let work_area = monitor.work_area();
+    let scale_factor = monitor_window.scale_factor().map_err(|e| e.to_string())?;
+    let margin = (WIDGET_WINDOW_MARGIN_LOGICAL * scale_factor).round() as i32;
+    let gap = (WIDGET_WINDOW_GAP_LOGICAL * scale_factor).round() as i32;
+    let window_width = (WIDGET_WINDOW_WIDTH_LOGICAL * scale_factor).round() as i32;
+    let window_heights: Vec<i32> = WIDGET_WINDOW_INITIAL_HEIGHTS
+        .iter()
+        .map(|height| (height * scale_factor).round() as i32)
+        .collect();
+    let total_height = window_heights.iter().sum::<i32>()
+        + gap * (WIDGET_WINDOW_LABELS.len().saturating_sub(1) as i32);
+    let x = work_area.position.x + work_area.size.width as i32 - window_width - margin;
+    let mut y = work_area.position.y + work_area.size.height as i32 - total_height - margin;
+
+    for (index, label) in WIDGET_WINDOW_LABELS.iter().enumerate() {
+        if let Some(window) = app.get_webview_window(label) {
+            append_app_log(
+                "INFO",
+                &format!("position widget label={label} x={x} y={y}"),
+            );
+            if let Err(error) =
+                set_widget_window_position(&window, label, PhysicalPosition { x, y })
+            {
+                append_app_log(
+                    "ERROR",
+                    &format!("position widget failed label={label} error={error}"),
+                );
+            }
+            y += window_heights[index] + gap;
+        }
+    }
+
+    Ok(())
+}
+
+fn align_widget_windows_from_anchor(
+    app: &AppHandle,
+    anchor_label: &str,
+    anchor_position: PhysicalPosition<i32>,
+) -> Result<(), String> {
+    let Some(anchor_index) = widget_window_index(anchor_label) else {
+        return Ok(());
+    };
+    let Some(anchor_window) = app.get_webview_window(anchor_label) else {
+        return Ok(());
+    };
+
+    let scale_factor = anchor_window.scale_factor().map_err(|e| e.to_string())?;
+    let gap = (WIDGET_WINDOW_GAP_LOGICAL * scale_factor).round() as i32;
+    let mut windows = Vec::new();
+    let mut heights = Vec::new();
+
+    for label in WIDGET_WINDOW_LABELS {
+        if let Some(window) = app.get_webview_window(label) {
+            let height = window.outer_size().map_err(|e| e.to_string())?.height as i32;
+            windows.push(Some(window));
+            heights.push(Some(height));
+        } else {
+            windows.push(None);
+            heights.push(None);
+        }
+    }
+
+    let mut y_positions = vec![None; WIDGET_WINDOW_LABELS.len()];
+    y_positions[anchor_index] = Some(anchor_position.y);
+
+    for index in (0..anchor_index).rev() {
+        if let (Some(next_y), Some(height)) = (y_positions[index + 1], heights[index]) {
+            y_positions[index] = Some(next_y - height - gap);
+        }
+    }
+
+    for index in (anchor_index + 1)..WIDGET_WINDOW_LABELS.len() {
+        if let (Some(previous_y), Some(previous_height)) =
+            (y_positions[index - 1], heights[index - 1])
+        {
+            y_positions[index] = Some(previous_y + previous_height + gap);
+        }
+    }
+
+    for (index, window) in windows.into_iter().enumerate() {
+        let Some(window) = window else {
+            continue;
+        };
+        let Some(y) = y_positions[index] else {
+            continue;
+        };
+        let target_position = PhysicalPosition {
+            x: anchor_position.x,
+            y,
+        };
+        let current_position = window.outer_position().map_err(|e| e.to_string())?;
+        if current_position == target_position {
+            continue;
+        }
+        set_widget_window_position(&window, WIDGET_WINDOW_LABELS[index], target_position)?;
+    }
+
+    Ok(())
+}
+
+fn sync_widget_window_widths_from_anchor(
+    app: &AppHandle,
+    anchor_label: &str,
+) -> Result<(), String> {
+    if widget_window_index(anchor_label).is_none() {
+        return Ok(());
+    }
+
+    let Some(anchor_window) = app.get_webview_window(anchor_label) else {
+        return Ok(());
+    };
+
+    let anchor_inner_size = anchor_window.inner_size().map_err(|e| e.to_string())?;
+    let anchor_scale_factor = anchor_window.scale_factor().map_err(|e| e.to_string())?;
+    let anchor_width = f64::from(anchor_inner_size.width) / anchor_scale_factor;
+
+    for label in WIDGET_WINDOW_LABELS {
+        if label == anchor_label {
+            continue;
+        }
+
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+
+        let inner_size = window.inner_size().map_err(|e| e.to_string())?;
+        if inner_size.width == anchor_inner_size.width {
+            continue;
+        }
+
+        let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
+        let height = f64::from(inner_size.height) / scale_factor;
+        let expected_width = (anchor_width * scale_factor).round() as u32;
+        mark_expected_widget_window_resize(label, expected_width);
+        window
+            .set_size(Size::Logical(LogicalSize {
+                width: anchor_width,
+                height,
+            }))
+            .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        append_app_log("PANIC", &panic_info.to_string());
+    }));
+    append_app_log("INFO", "application starting");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            append_app_log("INFO", "tauri setup start");
             // 创建托盘菜单
             let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "显示编辑窗口", true, None::<&str>)?;
@@ -1327,18 +1814,26 @@ fn main() {
                 .tooltip("每日待办")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
+                        append_app_log("INFO", "tray quit requested");
                         app.exit(0);
                     }
                     "show" => {
+                        append_app_log("INFO", "tray show editor requested");
                         if let Some(window) = app.get_webview_window("editor") {
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
                     }
                     "wallpaper" => {
+                        append_app_log("INFO", "tray toggle widget requested");
                         let app_handle = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let _ = toggle_widget_mode(app_handle).await;
+                            if let Err(error) = toggle_widget_mode(app_handle).await {
+                                append_app_log(
+                                    "ERROR",
+                                    &format!("tray toggle widget failed: {error}"),
+                                );
+                            }
                         });
                     }
                     _ => {}
@@ -1356,9 +1851,34 @@ fn main() {
                 })
                 .build(app)?;
 
+            append_app_log("INFO", "tauri setup completed");
             Ok(())
         })
         .on_window_event(|window, event| {
+            let label = window.label();
+            if widget_window_index(label).is_some() {
+                if let tauri::WindowEvent::Moved(position) = event {
+                    if consume_expected_widget_window_move(label, *position) {
+                        return;
+                    }
+
+                    let app = window.app_handle().clone();
+                    let _ = align_widget_windows_from_anchor(&app, label, *position);
+                }
+
+                if let tauri::WindowEvent::Resized(size) = event {
+                    if consume_expected_widget_window_resize(label, size.width) {
+                        return;
+                    }
+
+                    let app = window.app_handle().clone();
+                    let _ = sync_widget_window_widths_from_anchor(&app, label);
+                    if let Ok(position) = window.outer_position() {
+                        let _ = align_widget_windows_from_anchor(&app, label, position);
+                    }
+                }
+            }
+
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // 编辑窗口关闭时隐藏而不是退出
                 if window.label() == "editor" {
@@ -1386,9 +1906,12 @@ fn main() {
             is_autostart_enabled,
             set_autostart_enabled,
             show_notification,
+            get_app_log_path,
+            write_app_log,
             toggle_widget_mode,
             toggle_wallpaper_mode,
-            show_editor_window
+            show_editor_window,
+            resize_widget_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

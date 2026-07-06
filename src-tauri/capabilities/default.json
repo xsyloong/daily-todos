@@ -2,10 +2,17 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for local app windows.",
-  "windows": ["editor", "wallpaper"],
+  "windows": [
+    "editor",
+    "wallpaper",
+    "widget-jira",
+    "widget-daily",
+    "widget-long-term"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
     "notification:default"
   ]
 }
