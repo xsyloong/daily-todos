@@ -1576,7 +1576,7 @@ fn create_widget_window(
     #[cfg(windows)]
     let builder = builder.transparent(true).shadow(false);
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let builder = builder.transparent(true);
 
     let window = builder.build().map_err(|e| e.to_string())?;
